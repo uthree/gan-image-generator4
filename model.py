@@ -4,15 +4,15 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 class Conv2dMod(nn.Module):
-    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8, groups=1):
+    """Some Information about Conv2dMod"""
+    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8):
         super(Conv2dMod, self).__init__()
-        self.weight = nn.Parameter(torch.randn(output_channels, input_channels//groups, kernel_size, kernel_size, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.randn(output_channels, input_channels, kernel_size, kernel_size, dtype=torch.float32))
         nn.init.xavier_uniform_(self.weight) # initialize weight
         self.input_channels = input_channels
         self.output_channels = output_channels
         self.kernel_size = kernel_size
         self.eps = eps
-        self.groups = groups
 
     def forward(self, x, y):
         # x: (batch_size, input_channels, H, W) 
@@ -25,7 +25,7 @@ class Conv2dMod(nn.Module):
         w1 = w1.swapaxes(1, 2)
         w2 = self.weight[None, :, :, :, :]
         # modulate
-        weight = w1 * w2
+        weight = w2 * (w1 + 1)
 
         # demodulate
         d = torch.rsqrt((weight ** 2).sum(dim=(2, 3, 4), keepdim=True) + self.eps)
@@ -42,10 +42,11 @@ class Conv2dMod(nn.Module):
         x = F.pad(x, (self.kernel_size // 2, self.kernel_size // 2, self.kernel_size // 2, self.kernel_size // 2), mode='replicate')
         
         # convolution
-        x = F.conv2d(x, weight, stride=1, padding=0, groups=N * self.groups)
+        x = F.conv2d(x, weight, stride=1, padding=0, groups=N)
         x = x.reshape(N, self.output_channels, H, W)
 
         return x
+
 
 class PointwiseBias(nn.Module):
     """Some Information about Noise"""
@@ -62,18 +63,15 @@ class PointwiseBias(nn.Module):
         x = x + bias
         return x
 
-class Conv2dNeXtMod(nn.Module):
-    def __init__(self, input_channels, output_channels, style_dim):
-        super(Conv2dNeXtMod, self).__init__()
-        self.depthwise = Conv2dMod(input_channels, input_channels, kernel_size=7, groups=input_channels)
-        self.pontwise  = Conv2dMod(input_channels, output_channels, kernel_size=1)
-        self.affine_dw = nn.Linear(style_dim, input_channels)
-        self.affine_pw = nn.Linear(style_dim, output_channels)
+class Conv2dModBlock(nn.Module):
+    def __init__(self, input_channels, output_channels, style_dim, kernel_size=3):
+        super(Conv2dModBlock, self).__init__()
+        self.conv = Conv2dMod(input_channels, output_channels, kernel_size=kernel_size)
+        self.affine    = nn.Linear(style_dim, output_channels)
         self.bias      = PointwiseBias(output_channels)
     
     def forward(self, x, y):
-        x = self.depthwise(x, self.affine_dw(y))
-        x = self.pontwise(x, self.affine_pw(y))
+        x = self.conv(x, self.affine(y))
         x = self.bias(x)
         return x
 
@@ -85,10 +83,8 @@ class ToRGB(nn.Module):
 
     def forward(self, x, y):
         x = self.conv(x, self.affine(y))
+        return x
 
-class GeneratorBlock(nn.Module):
-    def __init__(self, input_channels, latent_channels, output_channel, style_dim):
-        super(GeneratorBlock, self).__init__()
 
 class Blur(nn.Module):
     def __init__(self):
@@ -133,3 +129,115 @@ class HighPass(nn.Module):
         # reshape
         x = x.reshape(shape)
         return x
+
+class EqualLinear(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(EqualLinear, self).__init__()
+        self.weight = torch.randn(output_dim, input_dim)
+        self.bias = torch.zeros(output_dim)
+    def forward(self, x):
+        return F.linear(x, self.weight, self.bias)
+
+class GeneratorBlock(nn.Module):
+    def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, activation=nn.LeakyReLU, upscale=True):
+        super(GeneratorBlock, self).__init__()
+        self.conv1 = nn.conv_in = Conv2dModBlock(input_channels, latent_channels, style_dim, kernel_size=kernel_size)
+        self.act1 = activation()
+        self.conv2 = nn.conv_in = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
+        self.act2 = activation()
+        self.to_rgb = ToRGB(output_channels, style_dim)
+        if upscale:
+            self.upscale = nn.Upsample(scale_factor=2)
+        else:
+            self.upscale = nn.Identity()
+
+    def forward(self, x, y):
+        x = self.upscale(x)
+        x = self.conv1(x, y)
+        x = self.act1(x)
+        x = self.conv2(x, y)
+        x = self.act1(x)
+        rgb = self.to_rgb(x, y)
+        return x, rgb
+
+class Generator(nn.Module):
+    def __init__(self, initial_channels=512, style_dim=512):
+        super(Generator, self).__init__()
+        self.layers = nn.ModuleList([])
+        self.last_channels = initial_channels
+        self.const = nn.Parameter(torch.randn(initial_channels, 4, 4))
+        self.upscale = nn.Upsample(scale_factor=2)
+        self.style_dim = style_dim
+
+        self.add_layer(initial_channels, upscale=False)
+
+    def forward(self, y):
+        if type(y) != list:
+            y = [y] * len(self.layers)
+        x = self.const.repeat(y[0].shape[0], 1, 1, 1)
+        rgb_out = None
+        for i in range(len(self.layers)):
+            x, rgb = self.layers[i](x, y[i])
+            if rgb_out == None:
+                rgb_out = rgb
+            else:
+                rgb_out = self.upscale(rgb_out) + rgb
+        return rgb_out
+
+    def add_layer(self, channels, upscale=True):
+        self.layers.append(GeneratorBlock(self.last_channels, (self.last_channels + channels)//2, channels, self.style_dim, upscale=upscale))
+        self.last_channels = channels
+
+class DiscriminatorBlock(nn.Module):
+    def __init__(self, input_channels, latent_channels, output_channels, downscale=True, activation=nn.LeakyReLU):
+        super(DiscriminatorBlock, self).__init__()
+        self.from_rgb = nn.Conv2d(3, input_channels, 1, 1, 0)
+        self.conv1 = nn.Conv2d(input_channels, latent_channels, 3, 1, 1)
+        self.act1  = activation()
+        self.conv2 = nn.Conv2d(latent_channels, output_channels, 3, 1, 1)
+        self.act2  = activation()
+        self.res   = nn.Conv2d(input_channels, output_channels, 1, 1, 0)
+        if downscale:
+            self.downscale = nn.AvgPool2d(kernel_size=2)
+        else:
+            self.downscale = nn.Identity()
+
+    def forward(self, x):
+        r = self.res(x)
+        x = self.conv1(x)
+        x = self.act1(x)
+        x = self.conv2(x)
+        x = self.act2(x)
+        x += r
+        x = self.downscale(x)
+        return x
+
+class Discriminator(nn.Module):
+    def __init__(self, initial_channels=512):
+        super(Discriminator, self).__init__()
+        self.last_channels = initial_channels
+        self.layers = nn.ModuleList([])
+        self.pool4x = nn.AvgPool2d(kernel_size=4)
+        self.fc1 = nn.Linear(initial_channels + 1, 128)
+        self.fc2 = nn.Linear(128, 1)
+        
+        self.add_layer(initial_channels)
+     
+    def forward(self, rgb):
+        x = self.layers[0].from_rgb(rgb)
+        for i in range(len(self.layers)):
+            x = self.layers[i](x)
+        x = self.pool4x(x)
+        x = x.reshape(x.shape[0], -1)
+        sigma = torch.std(x)
+        x = self.fc1(torch.cat([x, sigma]))
+        x = self.fc2(x)
+        return x
+
+    def add_layer(self, channels, downscale=True):
+        self.layers.insert(0, DiscriminatorBlock(self.last_channels, (self.last_channels + channels)//2, channels, downscale=downscale))
+        self.last_channels = channels
+
+G = Generator()
+D = Discriminator()
+image = G(torch.randn(2, 512))
