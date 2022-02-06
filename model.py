@@ -221,7 +221,7 @@ class Discriminator(nn.Module):
         self.fc1 = nn.Linear(initial_channels + 1, 128)
         self.fc2 = nn.Linear(128, 1)
         
-        self.add_layer(initial_channels)
+        self.add_layer(initial_channels, downscale=False)
      
     def forward(self, rgb):
         x = self.layers[0].from_rgb(rgb)
@@ -229,8 +229,9 @@ class Discriminator(nn.Module):
             x = self.layers[i](x)
         x = self.pool4x(x)
         x = x.reshape(x.shape[0], -1)
-        sigma = torch.std(x)
-        x = self.fc1(torch.cat([x, sigma]))
+        sigma = torch.std(x, dim=0, keepdim=False).mean().repeat(x.shape[0], 1) # Minibatch Std.
+        x = torch.cat([x,sigma], dim=1)
+        x = self.fc1(x)
         x = self.fc2(x)
         return x
 
@@ -238,6 +239,12 @@ class Discriminator(nn.Module):
         self.layers.insert(0, DiscriminatorBlock(self.last_channels, (self.last_channels + channels)//2, channels, downscale=downscale))
         self.last_channels = channels
 
-G = Generator()
-D = Discriminator()
-image = G(torch.randn(2, 512))
+class MappingNetwork(nn.Module):
+    def __init__(self, style_dim=512, num_layers=8):
+        super(MappingNetwork, self).__init__()
+        self.seq = nn.Sequential(*[EqualLinear(style_dim, style_dim) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(style_dim)
+    def forward(self, x):
+        return self.seq(self.norm(x))
+
+
