@@ -138,6 +138,14 @@ class EqualLinear(nn.Module):
     def forward(self, x):
         return F.linear(x, self.weight, self.bias)
 
+class MappingNetwork(nn.Module):
+    def __init__(self, style_dim=512, num_layers=8):
+        super(MappingNetwork, self).__init__()
+        self.seq = nn.Sequential(*[EqualLinear(style_dim, style_dim) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(style_dim)
+    def forward(self, x):
+        return self.seq(self.norm(x))
+
 class GeneratorBlock(nn.Module):
     def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, activation=nn.LeakyReLU, upscale=True):
         super(GeneratorBlock, self).__init__()
@@ -239,12 +247,9 @@ class Discriminator(nn.Module):
         self.layers.insert(0, DiscriminatorBlock(self.last_channels, (self.last_channels + channels)//2, channels, downscale=downscale))
         self.last_channels = channels
 
-class MappingNetwork(nn.Module):
-    def __init__(self, style_dim=512, num_layers=8):
-        super(MappingNetwork, self).__init__()
-        self.seq = nn.Sequential(*[EqualLinear(style_dim, style_dim) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(style_dim)
-    def forward(self, x):
-        return self.seq(self.norm(x))
-
+class GAN(nn.Module):
+    def __init__(self, initial_channels=512, style_dim=512):
+       self.mapping_network = MappingNetwork(style_dim)
+       self.generator = Generator(initial_channels, style_dim)
+       self.discriminator = Discriminator(initial_channels)
 
