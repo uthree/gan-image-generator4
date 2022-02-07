@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import multiprocessing
+
+from tqdm import tqdm
 
 class Conv2dMod(nn.Module):
     """Some Information about Conv2dMod"""
@@ -249,7 +252,59 @@ class Discriminator(nn.Module):
 
 class GAN(nn.Module):
     def __init__(self, initial_channels=512, style_dim=512):
-       self.mapping_network = MappingNetwork(style_dim)
-       self.generator = Generator(initial_channels, style_dim)
-       self.discriminator = Discriminator(initial_channels)
+        super(GAN, self).__init__()
+        self.mapping_network = MappingNetwork(style_dim)
+        self.generator = Generator(initial_channels, style_dim)
+        self.discriminator = Discriminator(initial_channels)
+        self.style_dim = style_dim
+        self.initial_channels = initial_channels
+    
+    def train_epoch(self, dataloader, optimizer, device, dtype=torch.float32):
+        for i, real in tqdm(enumerate(dataloader)):
+            N = real.shape[0]
+            D, M, G = self.generator, self.mapping_network, self.discriminator
+            
+            # train generator
+            M.zero_grad()
+            G.zero_grad()
+            z = torch.randn(N, self.tyle_dim, device=device, dtype=dtype)
+            w = self.mapping_network(z)
 
+            fake = G(w)
+            generator_loss = -D(fake).mean()
+            generator_loss.backward()
+
+            # train discriminator
+            fake = fake.detach()
+            discriminator_fake_loss = -torch.minimum(-D(fake)-1, torch.zeros(N, 0))
+            discriminator_real_loss = -torch.minimum(D(real)-1, torch.zeros(N, 0))
+            discriminator_loss = discriminator_fake_loss + discriminator_real_loss
+            discriminator_loss.backward()
+
+            # update parameter
+            optimizer.step()
+
+            tqdm.write(f"G: {generator_loss.item():.4f} D{generator_loss.item():.4f}")
+
+    def train_resolution(self, dataset, num_epoch, device, dtype=torch.float32):
+        optimizer = optim.Adam(self.parameters(), lr=1e-5)
+        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, num_workers=multiprocessing.cpu_count())
+        for i in range(num_epoch):
+            self.train_epoch(dataloader, optimizer, device, dtype=dtype)
+
+    def train(self, dataset,  num_epoch=100, batch_size=48, max_resolution=1024, device=torch.device('cpu'), dtype=torch.float32):
+        resolution = -1
+        while resolution <= max_resolution:
+            num_layers = len(self.generator.layers)
+            bs = batch_size // (2**(num_layers-1))
+            ch = self.initial-channels // (2 ** (num_layers-1))
+            if bs < 4:
+                bs = 4
+            if ch < 12:
+                ch = 12
+            self.train_resolution(dataset, num_epoch, device, dtype)
+            resolution = 4 * (2 ** (num_layers-1))
+            if resolution > max_resolution:
+                break
+            self.generator.add_layer(ch)
+            self.discriminator.add_layer(ch)

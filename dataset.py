@@ -6,6 +6,7 @@ import os
 import random
 import threading
 import time
+import shutil
 
 from PIL import Image
 from PIL import ImageFilter
@@ -32,6 +33,7 @@ class ImageDataset(torch.utils.data.Dataset):
         self.size = size
         
         # initialize directory
+        shutil.rmtree(self.chache_dir)
         # resize image and save to chache directory
         if not os.path.exists(self.chache_dir):
             os.mkdir(self.chache_dir)
@@ -73,8 +75,7 @@ class ImageDataset(torch.utils.data.Dataset):
 
         while self.__len__() == 0:
             print("waiting resize a few images...")
-            time.sleep(1)
-        print("A")
+            time.sleep(5)
         
     def __getitem__(self, index):
         # load image
@@ -91,5 +92,4 @@ class ImageDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return os.listdir(self.chache_dir).__len__()
-
 
