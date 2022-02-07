@@ -12,6 +12,7 @@ from PIL import Image
 from PIL import ImageFilter
 from tqdm import tqdm
 import numpy as np
+import multiprocessing
 
 import joblib
 
@@ -25,7 +26,6 @@ class ImageDataset(torch.utils.data.Dataset):
         self.chache_dir = chache_dir
         self.image_path_list = self.image_path_list[:max_len]
         self.size = -1
-        self.len = 0
     
     def set_size(self, size):
         if self.size == size:
@@ -73,14 +73,19 @@ class ImageDataset(torch.utils.data.Dataset):
         thread = threading.Thread(target=t)
         thread.start()
 
-        while self.__len__() == 0:
+        while self.__len__() < 1:
             print("waiting resize a few images...")
-            time.sleep(5)
+            time.sleep(1)
         
     def __getitem__(self, index):
         # load image
-        img_path = os.path.join(self.chache_dir, str(index) + ".jpg")
-        img = Image.open(img_path)
+        try:
+            img_path = os.path.join(self.chache_dir, str(index) + ".jpg")
+            img = Image.open(img_path)
+        except Exception:
+            print("Skipped error")
+            img_path = os.path.join(self.chache_dir,"0.jpg")
+            img = Image.open(img_path)
         # to numpy
         img = np.array(img)
         # normalize

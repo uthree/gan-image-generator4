@@ -136,8 +136,8 @@ class HighPass(nn.Module):
 class EqualLinear(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(EqualLinear, self).__init__()
-        self.weight = torch.randn(output_dim, input_dim)
-        self.bias = torch.zeros(output_dim)
+        self.weight = nn.Parameter(torch.randn(output_dim, input_dim))
+        self.bias = nn.Parameter(torch.zeros(output_dim))
     def forward(self, x):
         return F.linear(x, self.weight, self.bias)
 
@@ -247,7 +247,7 @@ class Discriminator(nn.Module):
         return x
 
     def add_layer(self, channels, downscale=True):
-        self.layers.insert(0, DiscriminatorBlock(self.last_channels, (self.last_channels + channels)//2, channels, downscale=downscale))
+        self.layers.insert(0, DiscriminatorBlock(channels, (self.last_channels + channels)//2, self.last_channels, downscale=downscale))
         self.last_channels = channels
 
 class GAN(nn.Module):
@@ -260,51 +260,59 @@ class GAN(nn.Module):
         self.initial_channels = initial_channels
     
     def train_epoch(self, dataloader, optimizer, device, dtype=torch.float32):
-        for i, real in tqdm(enumerate(dataloader)):
+        self.generator = self.generator.to(device)
+        self.discriminator = self.discriminator.to(device)
+        self.mapping_network = self.mapping_network.to(device)
+        self.to(device)
+        for i, real in enumerate(dataloader):
+            real = real.to(device)
             N = real.shape[0]
-            D, M, G = self.generator, self.mapping_network, self.discriminator
-            
+            G, M, D = self.generator, self.mapping_network, self.discriminator
             # train generator
             M.zero_grad()
             G.zero_grad()
-            z = torch.randn(N, self.tyle_dim, device=device, dtype=dtype)
+            z = torch.randn(N, self.style_dim, device=device, dtype=dtype)
             w = self.mapping_network(z)
-
             fake = G(w)
+
             generator_loss = -D(fake).mean()
             generator_loss.backward()
 
             # train discriminator
             fake = fake.detach()
-            discriminator_fake_loss = -torch.minimum(-D(fake)-1, torch.zeros(N, 0))
-            discriminator_real_loss = -torch.minimum(D(real)-1, torch.zeros(N, 0))
+            D.zero_grad()
+            discriminator_fake_loss = -torch.minimum(-D(fake)-1, torch.zeros(N, 1).to(device)).mean()
+            discriminator_real_loss = -torch.minimum(D(real)-1, torch.zeros(N, 1).to(device)).mean()
             discriminator_loss = discriminator_fake_loss + discriminator_real_loss
             discriminator_loss.backward()
 
             # update parameter
             optimizer.step()
+            
+            tqdm.write(f"Batch: {i} G: {generator_loss.item():.4f} D: {discriminator_loss.item():.4f}")
 
-            tqdm.write(f"G: {generator_loss.item():.4f} D{generator_loss.item():.4f}")
-
-    def train_resolution(self, dataset, num_epoch, device, dtype=torch.float32):
+    def train_resolution(self, dataset, num_epoch, batch_size, device, dtype=torch.float32):
         optimizer = optim.Adam(self.parameters(), lr=1e-5)
-        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, num_workers=multiprocessing.cpu_count())
-        for i in range(num_epoch):
+        dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=multiprocessing.cpu_count())
+        for i in tqdm(range(num_epoch)):
             self.train_epoch(dataloader, optimizer, device, dtype=dtype)
 
-    def train(self, dataset,  num_epoch=100, batch_size=48, max_resolution=1024, device=torch.device('cpu'), dtype=torch.float32):
+    def train(self, dataset,  num_epoch=100, batch_size=32, max_resolution=1024, device=None, dtype=torch.float32):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         resolution = -1
         while resolution <= max_resolution:
             num_layers = len(self.generator.layers)
             bs = batch_size // (2**(num_layers-1))
-            ch = self.initial-channels // (2 ** (num_layers-1))
+            ch = self.initial_channels // (2 ** (num_layers-1))
             if bs < 4:
                 bs = 4
             if ch < 12:
                 ch = 12
-            self.train_resolution(dataset, num_epoch, device, dtype)
             resolution = 4 * (2 ** (num_layers-1))
-            if resolution > max_resolution:
+            dataset.set_size(resolution)
+            self.to(device)
+            self.train_resolution(dataset, num_epoch, bs, device, dtype)
+            if resolution >= max_resolution:
                 break
             self.generator.add_layer(ch)
             self.discriminator.add_layer(ch)
