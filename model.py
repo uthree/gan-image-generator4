@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import multiprocessing
-
+import os
+import numpy as np
 from tqdm import tqdm
+from PIL import Image
 
 class Conv2dMod(nn.Module):
     """Some Information about Conv2dMod"""
@@ -111,7 +113,7 @@ class Blur(nn.Module):
 
 class HighPass(nn.Module):
     def __init__(self):
-        super(Blur, self).__init__()
+        super(HighPass, self).__init__()
         identity = torch.tensor([[0, 0, 0],
                                  [0, 1, 0],
                                  [0, 0, 0]])
@@ -145,9 +147,8 @@ class MappingNetwork(nn.Module):
     def __init__(self, style_dim=512, num_layers=8):
         super(MappingNetwork, self).__init__()
         self.seq = nn.Sequential(*[EqualLinear(style_dim, style_dim) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(style_dim)
     def forward(self, x):
-        return self.seq(self.norm(x))
+        return self.seq(x)
 
 class GeneratorBlock(nn.Module):
     def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, activation=nn.LeakyReLU, upscale=True):
@@ -179,6 +180,7 @@ class Generator(nn.Module):
         self.const = nn.Parameter(torch.randn(initial_channels, 4, 4))
         self.upscale = nn.Upsample(scale_factor=2)
         self.style_dim = style_dim
+        self.blur = Blur()
 
         self.add_layer(initial_channels, upscale=False)
 
@@ -192,7 +194,7 @@ class Generator(nn.Module):
             if rgb_out == None:
                 rgb_out = rgb
             else:
-                rgb_out = self.upscale(rgb_out) + rgb
+                rgb_out = self.blur(self.upscale(rgb_out)) + rgb
         return rgb_out
 
     def add_layer(self, channels, upscale=True):
@@ -200,13 +202,13 @@ class Generator(nn.Module):
         self.last_channels = channels
 
 class DiscriminatorBlock(nn.Module):
-    def __init__(self, input_channels, latent_channels, output_channels, downscale=True, activation=nn.LeakyReLU):
+    def __init__(self, input_channels, latent_channels, output_channels, downscale=True):
         super(DiscriminatorBlock, self).__init__()
         self.from_rgb = nn.Conv2d(3, input_channels, 1, 1, 0)
         self.conv1 = nn.Conv2d(input_channels, latent_channels, 3, 1, 1)
-        self.act1  = activation()
+        self.act1  = nn.LeakyReLU(0.2)
         self.conv2 = nn.Conv2d(latent_channels, output_channels, 3, 1, 1)
-        self.act2  = activation()
+        self.act2  = nn.LeakyReLU(0.2)
         self.res   = nn.Conv2d(input_channels, output_channels, 1, 1, 0)
         if downscale:
             self.downscale = nn.AvgPool2d(kernel_size=2)
@@ -230,6 +232,7 @@ class Discriminator(nn.Module):
         self.layers = nn.ModuleList([])
         self.pool4x = nn.AvgPool2d(kernel_size=4)
         self.fc1 = nn.Linear(initial_channels + 1, 128)
+        self.act1 = nn.LeakyReLU(0.2)
         self.fc2 = nn.Linear(128, 1)
         
         self.add_layer(initial_channels, downscale=False)
@@ -238,11 +241,12 @@ class Discriminator(nn.Module):
         x = self.layers[0].from_rgb(rgb)
         for i in range(len(self.layers)):
             x = self.layers[i](x)
+        mb_std = torch.std(x, dim=[0], keepdim=False).mean().unsqueeze(0).repeat(x.shape[0], 1) # Minibatch Std.
         x = self.pool4x(x)
-        x = x.reshape(x.shape[0], -1)
-        sigma = torch.std(x, dim=0, keepdim=False).mean().repeat(x.shape[0], 1) # Minibatch Std.
-        x = torch.cat([x,sigma], dim=1)
+        x = x.view(x.shape[0], -1)
+        x = torch.cat([x, mb_std], dim=1)
         x = self.fc1(x)
+        x = self.act1(x)
         x = self.fc2(x)
         return x
 
@@ -265,7 +269,9 @@ class GAN(nn.Module):
         self.mapping_network = self.mapping_network.to(device)
         self.to(device)
         for i, real in enumerate(dataloader):
-            real = real.to(device)
+            if real.shape[0] < 2:
+                continue
+            real = real.to(device).to(dtype)
             N = real.shape[0]
             G, M, D = self.generator, self.mapping_network, self.discriminator
             # train generator
@@ -291,14 +297,28 @@ class GAN(nn.Module):
             
             tqdm.write(f"Batch: {i} G: {generator_loss.item():.4f} D: {discriminator_loss.item():.4f}")
 
-    def train_resolution(self, dataset, num_epoch, batch_size, device, dtype=torch.float32):
+    def train_resolution(self, dataset, num_epoch, batch_size, device, dtype=torch.float32, result_dir='./results/', model_path='./model.pt'):
         optimizer = optim.Adam(self.parameters(), lr=1e-5)
         dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=multiprocessing.cpu_count())
         for i in tqdm(range(num_epoch)):
             self.train_epoch(dataloader, optimizer, device, dtype=dtype)
+            torch.save(self, model_path)
+
+            # save image
+            if not os.path.exists(result_dir):
+                os.mkdir(result_dir)
+            path = os.path.join(result_dir, f"{i}.jpg")
+            img = self.generator(self.mapping_network(torch.randn(1, self.style_dim, dtype=dtype, device=device)))
+            img = img.cpu().detach().numpy() * 127.5 + 127.5
+            img = img[0].transpose(1, 2, 0)
+            img = img.astype(np.uint8)
+            img = Image.fromarray(img, mode='RGB')
+            img.save(path)
+
 
     def train(self, dataset,  num_epoch=100, batch_size=32, max_resolution=1024, device=None, dtype=torch.float32):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.set_dtype(dtype=dtype)
         resolution = -1
         while resolution <= max_resolution:
             num_layers = len(self.generator.layers)
@@ -311,8 +331,38 @@ class GAN(nn.Module):
             resolution = 4 * (2 ** (num_layers-1))
             dataset.set_size(resolution)
             self.to(device)
+            print(f"Start training with batch size: {bs} ch: {ch}")
             self.train_resolution(dataset, num_epoch, bs, device, dtype)
             if resolution >= max_resolution:
                 break
             self.generator.add_layer(ch)
             self.discriminator.add_layer(ch)
+            self.set_dtype(dtype)
+
+    def set_dtype(self, dtype=torch.float16):
+        for param in self.parameters():
+            param.data = param.data.to(dtype)
+
+    def generate_random_image(self, num_images):
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        images = []
+        for i in range(num_images):
+            style = torch.randn(1, self.style_dim).to(device)
+            style = self.mapping_network(style)
+            image = self.generator(style)
+            image = image.detach().cpu().numpy()
+            images.append(image[0])
+        return images
+
+    def generate_random_image_to_directory(self, num_images, dir_path="./tests"):
+        images = self.generate_random_image(num_images)
+        if not os.path.exists(dir_path):
+            os.mkdir(dir_path)
+        for i in range(num_images):
+            image = images[i]
+            image = np.transpose(image, (1, 2, 0))
+            image = image * 127.5 + 127.5
+            image = image.astype(np.uint8)
+            image = Image.fromarray(image, mode='RGB')
+            image = image.resize((1024, 1024))
+            image.save(os.path.join(dir_path, f"{i}.png"))

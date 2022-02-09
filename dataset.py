@@ -75,7 +75,7 @@ class ImageDataset(torch.utils.data.Dataset):
 
         while self.__len__() < 1:
             print("waiting resize a few images...")
-            time.sleep(1)
+            time.sleep(5)
         
     def __getitem__(self, index):
         # load image

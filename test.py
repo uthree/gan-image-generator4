@@ -4,7 +4,6 @@ import torch
 import os
 import sys
 
-ds = ImageDataset(sys.argv[1:], max_len=5000)
 if os.path.exists('model.pt'):
     model = torch.load('model.pt')
     print("Loaded model")
@@ -12,4 +11,5 @@ else:
     print("Creating new model...")
     model = GAN()
     print("Created new model")
-model.train(ds, num_epoch=100, dtype=torch.float32)
+
+model.generate_random_image_to_directory(int(sys.argv[1]))
