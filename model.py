@@ -7,17 +7,19 @@ import os
 import numpy as np
 from tqdm import tqdm
 from PIL import Image
+import random
 
 class Conv2dMod(nn.Module):
     """Some Information about Conv2dMod"""
-    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8):
+    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8, demodulation=True):
         super(Conv2dMod, self).__init__()
         self.weight = nn.Parameter(torch.randn(output_channels, input_channels, kernel_size, kernel_size, dtype=torch.float32))
-        nn.init.xavier_uniform_(self.weight) # initialize weight
+        nn.init.kaiming_normal_(self.weight, a=0, mode='fan_in', nonlinearity='leaky_relu') # initialize weight
         self.input_channels = input_channels
         self.output_channels = output_channels
         self.kernel_size = kernel_size
         self.eps = eps
+        self.demodulation = demodulation
 
     def forward(self, x, y):
         # x: (batch_size, input_channels, H, W) 
@@ -33,8 +35,9 @@ class Conv2dMod(nn.Module):
         weight = w2 * (w1 + 1)
 
         # demodulate
-        d = torch.rsqrt((weight ** 2).sum(dim=(2, 3, 4), keepdim=True) + self.eps)
-        weight = weight * d
+        if self.demodulation:
+            d = torch.rsqrt((weight ** 2).sum(dim=(2, 3, 4), keepdim=True) + self.eps)
+            weight = weight * d
         # weight: (batch_size, output_channels, input_channels, kernel_size, kernel_size)
         
         # reshape
@@ -83,7 +86,7 @@ class Conv2dModBlock(nn.Module):
 class ToRGB(nn.Module):
     def __init__(self, channels, style_dim):
         super(ToRGB, self).__init__()
-        self.conv   = Conv2dMod(channels, 3, 1)
+        self.conv   = Conv2dMod(channels, 3, 1, demodulation=False)
         self.affine = nn.Linear(style_dim, 3)
 
     def forward(self, x, y):
@@ -136,27 +139,29 @@ class HighPass(nn.Module):
         return x
 
 class EqualLinear(nn.Module):
-    def __init__(self, input_dim, output_dim):
+    def __init__(self, input_dim, output_dim, lr_mul=0.1):
         super(EqualLinear, self).__init__()
         self.weight = nn.Parameter(torch.randn(output_dim, input_dim))
         self.bias = nn.Parameter(torch.zeros(output_dim))
+        self.lr_mul = lr_mul
     def forward(self, x):
-        return F.linear(x, self.weight, self.bias)
+        return F.linear(x, self.weight * self.lr_mul, self.bias *  self.lr_mul)
 
 class MappingNetwork(nn.Module):
     def __init__(self, style_dim=512, num_layers=8):
         super(MappingNetwork, self).__init__()
-        self.seq = nn.Sequential(*[EqualLinear(style_dim, style_dim) for _ in range(num_layers)])
+        self.seq = nn.Sequential(*[nn.Sequential(EqualLinear(style_dim, style_dim), nn.LeakyReLU(0.2)) for _ in range(num_layers)])
+        self.norm = nn.LayerNorm(style_dim)
     def forward(self, x):
-        return self.seq(x)
+        return self.seq(self.norm(x))
 
 class GeneratorBlock(nn.Module):
-    def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, activation=nn.LeakyReLU, upscale=True):
+    def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, upscale=True):
         super(GeneratorBlock, self).__init__()
         self.conv1 = nn.conv_in = Conv2dModBlock(input_channels, latent_channels, style_dim, kernel_size=kernel_size)
-        self.act1 = activation()
+        self.act1 = nn.LeakyReLU(0.2)
         self.conv2 = nn.conv_in = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
-        self.act2 = activation()
+        self.act2 = nn.LeakyReLU(0.2)
         self.to_rgb = ToRGB(output_channels, style_dim)
         if upscale:
             self.upscale = nn.Upsample(scale_factor=2)
@@ -274,11 +279,16 @@ class GAN(nn.Module):
             real = real.to(device).to(dtype)
             N = real.shape[0]
             G, M, D = self.generator, self.mapping_network, self.discriminator
+            L = len(G.layers)
             # train generator
             M.zero_grad()
             G.zero_grad()
-            z = torch.randn(N, self.style_dim, device=device, dtype=dtype)
-            w = self.mapping_network(z)
+            z1 = torch.randn(N, self.style_dim, device=device, dtype=dtype)
+            z2 = torch.randn(N, self.style_dim, device=device, dtype=dtype)
+            mid = random.randint(1, L)
+            w1 = self.mapping_network(z1)
+            w2 = self.mapping_network(z2)
+            w = [w1] * mid + [w2] * (L-mid)
             fake = G(w)
 
             generator_loss = -D(fake).mean()
