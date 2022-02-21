@@ -3,8 +3,14 @@ from dataset import ImageDataset
 import torch
 import os
 import sys
+from augmentations import *
+from augmentor import ImageDataAugmentor
 
-ds = ImageDataset(sys.argv[1:], max_len=5000)
+aug = ImageDataAugmentor()
+aug.add_function(flip, probability=0.5)
+aug.add_function(random_roll, probability=0.5)
+
+ds = ImageDataset(sys.argv[1:], max_len=10000, background_resize=False)
 if os.path.exists('model.pt'):
     model = torch.load('model.pt')
     print("Loaded model")
@@ -12,4 +18,4 @@ else:
     print("Creating new model...")
     model = GAN()
     print("Created new model")
-model.train(ds, num_epoch=100, dtype=torch.float32)
+model.train(ds, num_epoch=200, dtype=torch.float32, augment_func=aug)

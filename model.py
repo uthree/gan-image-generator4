@@ -11,15 +11,16 @@ import random
 
 class Conv2dMod(nn.Module):
     """Some Information about Conv2dMod"""
-    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8, demodulation=True):
+    def __init__(self, input_channels, output_channels, kernel_size=3, eps=1e-8, groups=1, demodulation=True):
         super(Conv2dMod, self).__init__()
-        self.weight = nn.Parameter(torch.randn(output_channels, input_channels, kernel_size, kernel_size, dtype=torch.float32))
+        self.weight = nn.Parameter(torch.randn(output_channels, input_channels // groups, kernel_size, kernel_size, dtype=torch.float32))
         nn.init.kaiming_normal_(self.weight, a=0, mode='fan_in', nonlinearity='leaky_relu') # initialize weight
         self.input_channels = input_channels
         self.output_channels = output_channels
         self.kernel_size = kernel_size
         self.eps = eps
         self.demodulation = demodulation
+        self.groups = groups
 
     def forward(self, x, y):
         # x: (batch_size, input_channels, H, W) 
@@ -43,7 +44,7 @@ class Conv2dMod(nn.Module):
         # reshape
         x = x.reshape(1, -1, H, W)
         _, _, *ws = weight.shape
-        weight = weight.reshape(self.output_channels * N, *ws)
+        weight = weight.reshape(self.output_channels * N * self.groups, *ws)
         
         
         # padding
@@ -84,13 +85,12 @@ class Conv2dModBlock(nn.Module):
         return x
 
 class ToRGB(nn.Module):
-    def __init__(self, channels, style_dim):
+    def __init__(self, channels):
         super(ToRGB, self).__init__()
-        self.conv   = Conv2dMod(channels, 3, 1, demodulation=False)
-        self.affine = nn.Linear(style_dim, 3)
+        self.conv   = nn.Conv2d(channels, 3, 1, 1, 0)
 
-    def forward(self, x, y):
-        x = self.conv(x, self.affine(y))
+    def forward(self, x):
+        x = self.conv(x)
         return x
 
 
@@ -162,7 +162,7 @@ class GeneratorBlock(nn.Module):
         self.act1 = nn.LeakyReLU(0.2)
         self.conv2 = nn.conv_in = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
         self.act2 = nn.LeakyReLU(0.2)
-        self.to_rgb = ToRGB(output_channels, style_dim)
+        self.to_rgb = ToRGB(output_channels)
         if upscale:
             self.upscale = nn.Upsample(scale_factor=2)
         else:
@@ -174,7 +174,7 @@ class GeneratorBlock(nn.Module):
         x = self.act1(x)
         x = self.conv2(x, y)
         x = self.act1(x)
-        rgb = self.to_rgb(x, y)
+        rgb = self.to_rgb(x)
         return x, rgb
 
 class Generator(nn.Module):
@@ -210,11 +210,11 @@ class DiscriminatorBlock(nn.Module):
     def __init__(self, input_channels, latent_channels, output_channels, downscale=True):
         super(DiscriminatorBlock, self).__init__()
         self.from_rgb = nn.Conv2d(3, input_channels, 1, 1, 0)
-        self.conv1 = nn.Conv2d(input_channels, latent_channels, 3, 1, 1)
-        self.act1  = nn.LeakyReLU(0.2)
-        self.conv2 = nn.Conv2d(latent_channels, output_channels, 3, 1, 1)
-        self.act2  = nn.LeakyReLU(0.2)
-        self.res   = nn.Conv2d(input_channels, output_channels, 1, 1, 0)
+        self.conv1 = nn.Conv2d(input_channels, latent_channels, 3, 1, 1, padding_mode='replicate')
+        self.act1 = nn.LeakyReLU(0.2)
+        self.conv2 = nn.Conv2d(latent_channels, output_channels, 3, 1, 1, padding_mode='replicate')
+        self.act2 = nn.LeakyReLU(0.2)
+        self.res = nn.Conv2d(input_channels, output_channels, 1, 1, 0)
         if downscale:
             self.downscale = nn.AvgPool2d(kernel_size=2)
         else:
@@ -226,7 +226,7 @@ class DiscriminatorBlock(nn.Module):
         x = self.act1(x)
         x = self.conv2(x)
         x = self.act2(x)
-        x += r
+        x = x + r
         x = self.downscale(x)
         return x
 
@@ -239,12 +239,15 @@ class Discriminator(nn.Module):
         self.fc1 = nn.Linear(initial_channels + 1, 128)
         self.act1 = nn.LeakyReLU(0.2)
         self.fc2 = nn.Linear(128, 1)
+        self.downscale = nn.Sequential(Blur(), nn.AvgPool2d(kernel_size=2))
         
         self.add_layer(initial_channels, downscale=False)
      
     def forward(self, rgb):
         x = self.layers[0].from_rgb(rgb)
         for i in range(len(self.layers)):
+            if i == 1:
+                x += self.layers[1].from_rgb(self.downscale(rgb))
             x = self.layers[i](x)
         mb_std = torch.std(x, dim=[0], keepdim=False).mean().unsqueeze(0).repeat(x.shape[0], 1) # Minibatch Std.
         x = self.pool4x(x)
@@ -268,10 +271,11 @@ class GAN(nn.Module):
         self.style_dim = style_dim
         self.initial_channels = initial_channels
     
-    def train_epoch(self, dataloader, optimizer, device, dtype=torch.float32):
+    def train_epoch(self, dataloader, optimizers, device, dtype=torch.float32,augment_func=nn.Identity):
         self.generator = self.generator.to(device)
         self.discriminator = self.discriminator.to(device)
         self.mapping_network = self.mapping_network.to(device)
+        opt_m, opt_g, opt_d = optimizers
         self.to(device)
         for i, real in enumerate(dataloader):
             if real.shape[0] < 2:
@@ -279,6 +283,7 @@ class GAN(nn.Module):
             real = real.to(device).to(dtype)
             N = real.shape[0]
             G, M, D = self.generator, self.mapping_network, self.discriminator
+            T = augment_func
             L = len(G.layers)
             # train generator
             M.zero_grad()
@@ -293,25 +298,31 @@ class GAN(nn.Module):
 
             generator_loss = -D(fake).mean()
             generator_loss.backward()
+            opt_m.step()
+            opt_g.step()
 
             # train discriminator
             fake = fake.detach()
             D.zero_grad()
-            discriminator_fake_loss = -torch.minimum(-D(fake)-1, torch.zeros(N, 1).to(device)).mean()
-            discriminator_real_loss = -torch.minimum(D(real)-1, torch.zeros(N, 1).to(device)).mean()
+            discriminator_fake_loss = -torch.minimum(-D(T(fake))-1, torch.zeros(N, 1).to(device)).mean()
+            discriminator_real_loss = -torch.minimum(D(T(real))-1, torch.zeros(N, 1).to(device)).mean()
             discriminator_loss = discriminator_fake_loss + discriminator_real_loss
             discriminator_loss.backward()
 
             # update parameter
-            optimizer.step()
+            opt_d.step()
             
             tqdm.write(f"Batch: {i} G: {generator_loss.item():.4f} D: {discriminator_loss.item():.4f}")
 
-    def train_resolution(self, dataset, num_epoch, batch_size, device, dtype=torch.float32, result_dir='./results/', model_path='./model.pt'):
-        optimizer = optim.Adam(self.parameters(), lr=1e-5)
+    def train_resolution(self, dataset, num_epoch, batch_size, device, dtype=torch.float32, result_dir='./results/', model_path='./model.pt', augment_func=nn.Identity()):
+        optimizers = (
+                optim.Adam(self.mapping_network.parameters(), lr=1e-5),
+                optim.Adam(self.generator.parameters(), lr=1e-5),
+                optim.Adam(self.discriminator.parameters(), lr=1e-5),
+                )
         dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, batch_size=batch_size, num_workers=multiprocessing.cpu_count())
         for i in tqdm(range(num_epoch)):
-            self.train_epoch(dataloader, optimizer, device, dtype=dtype)
+            self.train_epoch(dataloader, optimizers, device, dtype=dtype, augment_func=augment_func)
             torch.save(self, model_path)
 
             # save image
@@ -326,7 +337,7 @@ class GAN(nn.Module):
             img.save(path)
 
 
-    def train(self, dataset,  num_epoch=100, batch_size=32, max_resolution=1024, device=None, dtype=torch.float32):
+    def train(self, dataset,  num_epoch=100, batch_size=32, max_resolution=1024, device=None, dtype=torch.float32, augment_func=nn.Identity()):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.set_dtype(dtype=dtype)
         resolution = -1
@@ -342,7 +353,7 @@ class GAN(nn.Module):
             dataset.set_size(resolution)
             self.to(device)
             print(f"Start training with batch size: {bs} ch: {ch}")
-            self.train_resolution(dataset, num_epoch, bs, device, dtype)
+            self.train_resolution(dataset, num_epoch, bs, device, dtype, augment_func=augment_func)
             if resolution >= max_resolution:
                 break
             self.generator.add_layer(ch)
@@ -357,8 +368,13 @@ class GAN(nn.Module):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         images = []
         for i in range(num_images):
-            style = torch.randn(1, self.style_dim).to(device)
-            style = self.mapping_network(style)
+            z1 = torch.randn(1, self.style_dim).to(device)
+            z2 = torch.randn(1, self.style_dim).to(device)
+            w1 = self.mapping_network(z1)
+            w2 = self.mapping_network(z2)
+            L = len(self.generator.layers)
+            mid = random.randint(1, L)
+            style = [w1] * mid + [w2] * (L-mid)
             image = self.generator(style)
             image = image.detach().cpu().numpy()
             images.append(image[0])

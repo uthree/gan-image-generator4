@@ -18,7 +18,7 @@ import joblib
 
 class ImageDataset(torch.utils.data.Dataset):
     """Some Information about ImageDataset"""
-    def __init__(self, source_dir_pathes=[], chache_dir="./dataset_chache/", size=4, max_len=100000):
+    def __init__(self, source_dir_pathes=[], chache_dir="./dataset_chache/", size=4, max_len=100000, background_resize=True):
         super(ImageDataset, self).__init__()
         self.image_path_list = []
         for dir_path in source_dir_pathes:
@@ -26,6 +26,10 @@ class ImageDataset(torch.utils.data.Dataset):
         self.chache_dir = chache_dir
         self.image_path_list = self.image_path_list[:max_len]
         self.size = -1
+        self.max_len = max_len
+        self.background_resize = background_resize
+        if not os.path.exists(chache_dir):
+            os.mkdir(chache_dir)
     
     def set_size(self, size):
         if self.size == size:
@@ -65,17 +69,23 @@ class ImageDataset(torch.utils.data.Dataset):
             empty.save(path)
             del img
             del empty
+            if i % 100 == 0:
+                print(f"completed resize {i} images.")
             
         def t():
             _ = joblib.Parallel(n_jobs=-1)(joblib.delayed(fn)(i) for i in range(len(self.image_path_list)))
             print("resize complete")
-
-        thread = threading.Thread(target=t)
-        thread.start()
-
-        while self.__len__() < 1:
-            print("waiting resize a few images...")
-            time.sleep(5)
+        
+        if self.background_resize:
+            thread = threading.Thread(target=t)
+            thread.start()
+        
+            time.sleep(3)
+            while self.__len__() < self.max_len // 100:
+                print("waiting resize a few images...")
+                time.sleep(5)
+        else:
+            t()
         
     def __getitem__(self, index):
         # load image
