@@ -343,8 +343,8 @@ class GAN(nn.Module):
         resolution = -1
         while resolution <= max_resolution:
             num_layers = len(self.generator.layers)
-            bs = batch_size // (2**(num_layers-1))
-            ch = self.initial_channels // (2 ** (num_layers-1))
+            bs = batch_size // (2 ** max(num_layers-3, 0))
+            ch = self.initial_channels // (2 ** max(num_layers-3, 0))
             if bs < 4:
                 bs = 4
             if ch < 12:
