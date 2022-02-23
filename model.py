@@ -186,6 +186,7 @@ class Generator(nn.Module):
         self.upscale = nn.Upsample(scale_factor=2)
         self.style_dim = style_dim
         self.blur = Blur()
+        self.tanh = nn.Tanh()
 
         self.add_layer(initial_channels, upscale=False)
 
@@ -200,6 +201,7 @@ class Generator(nn.Module):
                 rgb_out = rgb
             else:
                 rgb_out = self.blur(self.upscale(rgb_out)) + rgb
+        rgb_out = self.tanh(rgb_out)
         return rgb_out
 
     def add_layer(self, channels, upscale=True):
