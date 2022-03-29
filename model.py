@@ -138,6 +138,17 @@ class HighPass(nn.Module):
         x = x.reshape(shape)
         return x
 
+class NoiseInjection(nn.Module):
+    """Some Information about NoiseInjection"""
+    def __init__(self, channels):
+        super(NoiseInjection, self).__init__()
+        self.conv = nn.Conv2d(channels, 1, 1, 1, 0)
+        
+    def forward(self, x):
+        gain = self.conv(x)
+        noise = torch.randn(*x.shape).to(x.device) * gain
+        return x + noise
+
 class EqualLinear(nn.Module):
     def __init__(self, input_dim, output_dim, lr_mul=0.1):
         super(EqualLinear, self).__init__()
@@ -160,8 +171,10 @@ class GeneratorBlock(nn.Module):
         super(GeneratorBlock, self).__init__()
         self.conv1 = nn.conv_in = Conv2dModBlock(input_channels, latent_channels, style_dim, kernel_size=kernel_size)
         self.act1 = nn.LeakyReLU(0.2)
+        self.noise1 = NoiseInjection(latent_channels)
         self.conv2 = nn.conv_in = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
         self.act2 = nn.LeakyReLU(0.2)
+        self.noise2 = NoiseInjection(output_channels)
         self.to_rgb = ToRGB(output_channels)
         if upscale:
             self.upscale = nn.Upsample(scale_factor=2)
@@ -172,8 +185,10 @@ class GeneratorBlock(nn.Module):
         x = self.upscale(x)
         x = self.conv1(x, y)
         x = self.act1(x)
+        x = self.noise1(x)
         x = self.conv2(x, y)
         x = self.act1(x)
+        x = self.noise2(x)
         rgb = self.to_rgb(x)
         return x, rgb
 
@@ -186,7 +201,6 @@ class Generator(nn.Module):
         self.upscale = nn.Upsample(scale_factor=2)
         self.style_dim = style_dim
         self.blur = Blur()
-        self.tanh = nn.Tanh()
 
         self.add_layer(initial_channels, upscale=False)
 
@@ -201,7 +215,7 @@ class Generator(nn.Module):
                 rgb_out = rgb
             else:
                 rgb_out = self.blur(self.upscale(rgb_out)) + rgb
-        rgb_out = self.tanh(rgb_out)
+        rgb_out = torch.tanh(rgb_out)
         return rgb_out
 
     def add_layer(self, channels, upscale=True):
