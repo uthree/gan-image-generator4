@@ -16,6 +16,6 @@ if os.path.exists('model.pt'):
     print("Loaded model")
 else:
     print("Creating new model...")
-    model = GAN()
+    model = GAN(style_dim=512)
     print("Created new model")
-model.train(ds, num_epoch=50, dtype=torch.float32, augment_func=aug)
+model.train(ds, num_epoch=100, dtype=torch.float32, augment_func=aug, batch_size=16)

@@ -167,15 +167,16 @@ class MappingNetwork(nn.Module):
         return self.seq(self.norm(x))
 
 class GeneratorBlock(nn.Module):
-    def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, upscale=True):
+    def __init__(self, input_channels, latent_channels, output_channels, style_dim, num_latent_layers=0, kernel_size=3, upscale=True, p_drop=0):
         super(GeneratorBlock, self).__init__()
-        self.conv1 = nn.conv_in = Conv2dModBlock(input_channels, latent_channels, style_dim, kernel_size=kernel_size)
+        self.conv1 = Conv2dModBlock(input_channels, latent_channels, style_dim, kernel_size=kernel_size)
         self.act1 = nn.LeakyReLU(0.2)
         self.noise1 = NoiseInjection(latent_channels)
-        self.conv2 = nn.conv_in = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
+        self.conv2 = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
         self.act2 = nn.LeakyReLU(0.2)
         self.noise2 = NoiseInjection(output_channels)
         self.to_rgb = ToRGB(output_channels)
+        self.p_drop = p_drop
         if upscale:
             self.upscale = nn.Upsample(scale_factor=2)
         else:
@@ -183,17 +184,19 @@ class GeneratorBlock(nn.Module):
 
     def forward(self, x, y):
         x = self.upscale(x)
-        x = self.conv1(x, y)
-        x = self.act1(x)
-        x = self.noise1(x)
-        x = self.conv2(x, y)
-        x = self.act1(x)
-        x = self.noise2(x)
+        if self.p_drop <= random.random() or not self.training:
+            x = self.conv1(x, y)
+            x = self.act1(x)
+            x = self.noise1(x)
+        if self.p_drop <= random.random() or not self.training:
+            x = self.conv2(x, y)
+            x = self.act2(x)
+            x = self.noise2(x)
         rgb = self.to_rgb(x)
         return x, rgb
 
 class Generator(nn.Module):
-    def __init__(self, initial_channels=512, style_dim=512):
+    def __init__(self, initial_channels=512, style_dim=512, depth_dropout_probability=0.0):
         super(Generator, self).__init__()
         self.layers = nn.ModuleList([])
         self.last_channels = initial_channels
@@ -201,8 +204,7 @@ class Generator(nn.Module):
         self.upscale = nn.Upsample(scale_factor=2)
         self.style_dim = style_dim
         self.blur = Blur()
-
-        self.add_layer(initial_channels, upscale=False)
+        self.add_layer(initial_channels, upscale=False, p_drop=depth_dropout_probability)
 
     def forward(self, y):
         if type(y) != list:
@@ -218,12 +220,12 @@ class Generator(nn.Module):
         rgb_out = torch.tanh(rgb_out)
         return rgb_out
 
-    def add_layer(self, channels, upscale=True):
-        self.layers.append(GeneratorBlock(self.last_channels, (self.last_channels + channels)//2, channels, self.style_dim, upscale=upscale))
+    def add_layer(self, channels, upscale=True, p_drop=0.0):
+        self.layers.append(GeneratorBlock(self.last_channels, (self.last_channels + channels)//2, channels, self.style_dim, upscale=upscale, p_drop=p_drop))
         self.last_channels = channels
 
 class DiscriminatorBlock(nn.Module):
-    def __init__(self, input_channels, latent_channels, output_channels, downscale=True):
+    def __init__(self, input_channels, latent_channels, output_channels, downscale=True, p_drop=0.0):
         super(DiscriminatorBlock, self).__init__()
         self.from_rgb = nn.Conv2d(3, input_channels, 1, 1, 0)
         self.conv1 = nn.Conv2d(input_channels, latent_channels, 3, 1, 1, padding_mode='replicate')
@@ -231,6 +233,7 @@ class DiscriminatorBlock(nn.Module):
         self.conv2 = nn.Conv2d(latent_channels, output_channels, 3, 1, 1, padding_mode='replicate')
         self.act2 = nn.LeakyReLU(0.2)
         self.res = nn.Conv2d(input_channels, output_channels, 1, 1, 0)
+        self.p_drop = p_drop
         if downscale:
             self.downscale = nn.AvgPool2d(kernel_size=2)
         else:
@@ -238,16 +241,18 @@ class DiscriminatorBlock(nn.Module):
 
     def forward(self, x):
         r = self.res(x)
-        x = self.conv1(x)
-        x = self.act1(x)
-        x = self.conv2(x)
-        x = self.act2(x)
-        x = x + r
+        if self.p_drop <= random.random():
+            x = self.conv1(x)
+            x = self.act1(x)
+        if self.p_drop <= random.random():
+            x = self.conv2(x)
+            x = self.act2(x)
+        x = (x + r)
         x = self.downscale(x)
         return x
 
 class Discriminator(nn.Module):
-    def __init__(self, initial_channels=512):
+    def __init__(self, initial_channels=512, depth_dropout_probability=0.0):
         super(Discriminator, self).__init__()
         self.last_channels = initial_channels
         self.layers = nn.ModuleList([])
@@ -256,8 +261,8 @@ class Discriminator(nn.Module):
         self.act1 = nn.LeakyReLU(0.2)
         self.fc2 = nn.Linear(128, 1)
         self.downscale = nn.Sequential(Blur(), nn.AvgPool2d(kernel_size=2))
-        
-        self.add_layer(initial_channels, downscale=False)
+
+        self.add_layer(initial_channels, downscale=False, p_drop=depth_dropout_probability)
      
     def forward(self, rgb):
         x = self.layers[0].from_rgb(rgb)
@@ -274,8 +279,8 @@ class Discriminator(nn.Module):
         x = self.fc2(x)
         return x
 
-    def add_layer(self, channels, downscale=True):
-        self.layers.insert(0, DiscriminatorBlock(channels, (self.last_channels + channels)//2, self.last_channels, downscale=downscale))
+    def add_layer(self, channels, downscale=True, p_drop=0.0):
+        self.layers.insert(0, DiscriminatorBlock(channels, (self.last_channels + channels)//2, self.last_channels, downscale=downscale, p_drop=p_drop))
         self.last_channels = channels
 
 class GAN(nn.Module):
@@ -299,6 +304,9 @@ class GAN(nn.Module):
             real = real.to(device).to(dtype)
             N = real.shape[0]
             G, M, D = self.generator, self.mapping_network, self.discriminator
+            G.train()
+            M.train()
+            D.train()
             T = augment_func
             L = len(G.layers)
             # train generator
