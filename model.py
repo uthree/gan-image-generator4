@@ -85,12 +85,13 @@ class Conv2dModBlock(nn.Module):
         return x
 
 class ToRGB(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, style_dim):
         super(ToRGB, self).__init__()
-        self.conv   = nn.Conv2d(channels, 3, 1, 1, 0)
+        self.conv = Conv2dMod(channels, 3, 1, demodulation=False)
+        self.affine = nn.Linear(style_dim, 3)
 
-    def forward(self, x):
-        x = self.conv(x)
+    def forward(self, x, y):
+        x = self.conv(x, self.affine(y))
         return x
 
 
@@ -175,7 +176,7 @@ class GeneratorBlock(nn.Module):
         self.conv2 = Conv2dModBlock(latent_channels, output_channels, style_dim, kernel_size=kernel_size)
         self.act2 = nn.LeakyReLU(0.2)
         self.noise2 = NoiseInjection(output_channels)
-        self.to_rgb = ToRGB(output_channels)
+        self.to_rgb = ToRGB(output_channels, style_dim)
         self.p_drop = p_drop
         if upscale:
             self.upscale = nn.Upsample(scale_factor=2)
@@ -192,7 +193,7 @@ class GeneratorBlock(nn.Module):
             x = self.conv2(x, y)
             x = self.act2(x)
             x = self.noise2(x)
-        rgb = self.to_rgb(x)
+        rgb = self.to_rgb(x, y)
         return x, rgb
 
 class Generator(nn.Module):
@@ -388,14 +389,14 @@ class GAN(nn.Module):
         for param in self.parameters():
             param.data = param.data.to(dtype)
 
-    def generate_random_image(self, num_images):
+    def generate_random_image(self, num_images, scale=1.0):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         images = []
         for i in range(num_images):
             z1 = torch.randn(1, self.style_dim).to(device)
             z2 = torch.randn(1, self.style_dim).to(device)
-            w1 = self.mapping_network(z1)
-            w2 = self.mapping_network(z2)
+            w1 = self.mapping_network(z1) * scale
+            w2 = self.mapping_network(z2) * scale
             L = len(self.generator.layers)
             mid = random.randint(1, L)
             style = [w1] * mid + [w2] * (L-mid)
@@ -404,8 +405,8 @@ class GAN(nn.Module):
             images.append(image[0])
         return images
 
-    def generate_random_image_to_directory(self, num_images, dir_path="./tests"):
-        images = self.generate_random_image(num_images)
+    def generate_random_image_to_directory(self, num_images, dir_path="./tests", scale=1.0):
+        images = self.generate_random_image(num_images, scale=scale)
         if not os.path.exists(dir_path):
             os.mkdir(dir_path)
         for i in range(num_images):

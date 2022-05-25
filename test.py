@@ -12,4 +12,4 @@ else:
     model = GAN()
     print("Created new model")
 
-model.generate_random_image_to_directory(int(sys.argv[1]))
+model.generate_random_image_to_directory(int(sys.argv[1]), scale=1.0)
